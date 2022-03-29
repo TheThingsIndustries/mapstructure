@@ -2,9 +2,11 @@ package mapstructure
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1381,6 +1383,7 @@ func TestDecoder_ErrorUnused_NotSetable(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
 func TestDecoder_ErrorUnset(t *testing.T) {
 	t.Parallel()
 
@@ -2108,7 +2111,7 @@ func TestDecodeTable(t *testing.T) {
 			"struct with slice of struct property",
 			&SliceOfStruct{
 				Value: []Basic{
-					Basic{
+					{
 						Vstring: "vstring",
 						Vint:    2,
 						Vuint:   3,
@@ -2123,7 +2126,7 @@ func TestDecodeTable(t *testing.T) {
 			&map[string]interface{}{},
 			&map[string]interface{}{
 				"Value": []Basic{
-					Basic{
+					{
 						Vstring: "vstring",
 						Vint:    2,
 						Vuint:   3,
@@ -2148,7 +2151,8 @@ func TestDecodeTable(t *testing.T) {
 				"Vfoo": "vfoo",
 				"Vother": map[string]string{
 					"vother": "vother",
-				}},
+				},
+			},
 			false,
 		},
 		{
@@ -2405,7 +2409,8 @@ func TestMetadata(t *testing.T) {
 
 	expectedUnset := []string{
 		"Vbar.Vbool", "Vbar.Vdata", "Vbar.Vextra", "Vbar.Vfloat", "Vbar.Vint",
-		"Vbar.VjsonFloat", "Vbar.VjsonInt", "Vbar.VjsonNumber"}
+		"Vbar.VjsonFloat", "Vbar.VjsonInt", "Vbar.VjsonNumber",
+	}
 	sort.Strings(md.Unset)
 	if !reflect.DeepEqual(md.Unset, expectedUnset) {
 		t.Fatalf("bad unset: %#v", md.Unset)
@@ -2729,6 +2734,85 @@ func TestDecoder_IgnoreUntaggedFields(t *testing.T) {
 
 	if !reflect.DeepEqual(expected, actual) {
 		t.Fatalf("Decode() expected: %#v\ngot: %#v", expected, actual)
+	}
+}
+
+func TestTypedNilPostHooks(t *testing.T) {
+	type customType1 int
+	type customType2 float64
+	type configType struct {
+		C *customType1 `mapstructure:"c"`
+		A *customType2 `mapstructure:"a"`
+	}
+
+	for i, marshalledConfig := range []map[string]interface{}{
+		{
+			"c": (*customType1)(nil),
+			"a": (*customType2)(floatPtr(42.42)),
+		},
+		{
+			"c": "",
+			"a": "42.42",
+		},
+	} {
+		t.Run(fmt.Sprintf("%v", i), func(t *testing.T) {
+			actual := &configType{}
+			decoder, err := NewDecoder(&DecoderConfig{
+				Result: actual,
+				DecodeHook: ComposeDecodeHookFunc(
+					func(f reflect.Type, t reflect.Type, data interface{}) (interface{}, error) {
+						var enum customType1
+						if f.Kind() != reflect.String || t != reflect.TypeOf(&enum) {
+							return data, nil
+						}
+						s := data.(string)
+						if s == "" {
+							// Returning an untyped nil here would cause a panic, as `from.Type()`
+							// is invalid for nil.
+							return (*customType1)(nil), nil
+						}
+						n, err := strconv.ParseInt(s, 10, 32)
+						if err != nil {
+							return nil, err
+						}
+						enum = customType1(n)
+						return &enum, nil
+					},
+					func(f reflect.Type, t reflect.Type, data interface{}) (interface{}, error) {
+						var enum customType2
+						if f.Kind() != reflect.String || t != reflect.TypeOf(&enum) {
+							return data, nil
+						}
+						s := data.(string)
+						if s == "" {
+							return (*customType2)(nil), nil
+						}
+						n, err := strconv.ParseFloat(s, 64)
+						if err != nil {
+							return nil, err
+						}
+						enum = customType2(n)
+						return &enum, nil
+					},
+				),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := decoder.Decode(marshalledConfig); err != nil {
+				t.Fatal(err)
+			}
+
+			expected := &configType{
+				C: nil,
+				A: (*customType2)(floatPtr(42.42)),
+			}
+
+			if !reflect.DeepEqual(expected, actual) {
+				t.Fatalf("Decode() expected: %#v, got: %#v", expected, actual)
+			}
+		})
 	}
 }
 
